@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc 
 import threading
 import shutil
+api_lock = threading.Semaphore(4)
+file_lock = threading.Lock()
 
 st.set_page_config(page_title="CF Rating Predictor", layout="wide")
 
@@ -117,78 +119,68 @@ def get_json(url, params=None, use_cache=True):
     filename = f"{method_name}{params_str}.json".replace(":", "").replace("/", "")
     filepath = os.path.join(CACHE_DIR, filename)
 
+    def parse_cache_data(data, fname):
+        if "ratingChanges" in fname and isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+            return [{"rank": r[0], "oldRating": r[1], "newRating": r[2]} for r in data]
+        if "contest.standings" in fname and isinstance(data, list):
+            return data
+        return data
+
     if use_cache and os.path.exists(filepath):
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            if "ratingChanges" in filename and isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
-                return [{"rank": r[0], "oldRating": r[1], "newRating": r[2]} for r in data]
-            
-            if "contest.standings" in filename and isinstance(data, list):
-                return data
-
-            return data
-        except Exception as e: 
-            print(f"Cache read error: {e}")
+                return parse_cache_data(json.load(f), filename)
+        except Exception:
             pass 
 
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            if attempt > 0:
-                time.sleep(1.1) 
-            else:
-                time.sleep(random.uniform(0.1, 0.2))
-            
-            resp = requests.get(url, params=params, timeout=15)
-            
-            if resp.status_code == 429:
-                time.sleep(1.2) 
-                continue
-            
-            resp.raise_for_status()
-            data = resp.json()
-            if data['status'] != 'OK': 
-                raise ValueError(f"API Error: {data.get('comment')}")
-            
-            result = data['result']
-            save_data = result
+    with api_lock:
+        if use_cache and os.path.exists(filepath):
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    return parse_cache_data(json.load(f), filename)
+            except Exception: pass
 
-            if "ratingChanges" in url:
-                compact_list = []
-                for row in result:
-                    compact_list.append([row['rank'], row['oldRating'], row['newRating']])
-                save_data = compact_list
-            
-            if "contest.standings" in url:
-                compact_list = []
-                rows = result.get('rows', []) if isinstance(result, dict) else []
-                for row in rows:
-                    try:
-                        r = row['rank']
-                        t = row['party']['startTimeSeconds']
-                        v = 1 if row['party']['participantType'] == 'VIRTUAL' else 0
-                        compact_list.append([r, t, v])
-                    except: pass
-                save_data = compact_list
-            
-            if use_cache:
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    json.dump(save_data, f, separators=(',', ':'))
-            
-            if "ratingChanges" in url and isinstance(save_data, list):
-                 return [{"rank": r[0], "oldRating": r[1], "newRating": r[2]} for r in save_data]
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    time.sleep(1.1) 
+                else:
+                    time.sleep(random.uniform(0.1, 0.2))
+                
+                resp = requests.get(url, params=params, timeout=15)
+                if resp.status_code == 429:
+                    time.sleep(1.2) 
+                    continue
+                
+                resp.raise_for_status()
+                data = resp.json()
+                if data['status'] != 'OK': 
+                    raise ValueError(f"API Error: {data.get('comment')}")
+                
+                result = data['result']
+                save_data = result
 
-            if "contest.standings" in url:
-                return save_data
+                if "ratingChanges" in url:
+                    save_data = [[row['rank'], row['oldRating'], row['newRating']] for row in result]
+                elif "contest.standings" in url:
+                    rows = result.get('rows', []) if isinstance(result, dict) else []
+                    save_data = [[row['rank'], row['party']['startTimeSeconds'], 1 if row['party']['participantType'] == 'VIRTUAL' else 0] for row in rows]
+                
+                if use_cache:
+                    if not os.path.exists(CACHE_DIR): 
+                        os.makedirs(CACHE_DIR)
+                    with file_lock: 
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            json.dump(save_data, f, separators=(',', ':'))
+                
+                if "ratingChanges" in url:
+                    return [{"rank": r[0], "oldRating": r[1], "newRating": r[2]} for r in save_data]
+                return save_data if "contest.standings" in url else result
 
-            return result 
-
-        except Exception as e:
-            print(f"Fetch error {url} (Attempt {attempt+1}/{max_retries}): {e}")
-            if attempt == max_retries - 1:
-                return None
+            except Exception as e:
+                print(f"Fetch error {url} (Attempt {attempt+1}/{max_retries}): {e}")
+                if attempt == max_retries - 1: return None
 
     return None
 
@@ -223,7 +215,7 @@ def fetch_rating_changes_to_disk(cid):
     get_json("https://codeforces.com/api/contest.ratingChanges", {"contestId": cid}, use_cache=True)
     return cid
 
-def process_batches(task_list, worker_func, max_workers=5, update_callback=None):
+def process_batches(task_list, worker_func, max_workers=10, update_callback=None):
     results = []
     total = len(task_list)
     
