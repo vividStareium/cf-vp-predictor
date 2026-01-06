@@ -7,11 +7,12 @@ import random
 from datetime import datetime
 import plotly.graph_objects as go 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import gc 
+import threading
+import shutil
 
-# ================= 1. Configuration & Localization =================
 st.set_page_config(page_title="CF Rating Predictor", layout="wide")
 
-# Translation Dictionary
 TRANSLATIONS = {
     "en": {
         "title": "Codeforces Rating Simulator",
@@ -19,9 +20,10 @@ TRANSLATIONS = {
         "sidebar_header": "Configuration",
         "input_handle": "CF Handle",
         "input_init_rating": "Initial Rating",
-        "note": "**Note:** When analyzing a specific Handle for the first time, the system needs to download its historical data. This may take a few minutes. Subsequent runs for the same Handle will be instant due to caching.",
+        "note": "**Note:** When analyzing a specific Handle for the first time, the system needs to download its historical data. This may take a few minutes. Be patient pls.",
         "checkbox_show_real": "Show Official Rating Comparison",
         "checkbox_help": "Overlays your actual official rating curve (dashed blue line) for comparison.",
+        "checkbox_unrated": "Show Unrated Contests",
         "btn_clear_cache": "Clear Cache",
         "msg_cache_cleared": "Cache cleared successfully.",
         "btn_start": "Start Analysis",
@@ -47,9 +49,10 @@ TRANSLATIONS = {
         "sidebar_header": "配置面板",
         "input_handle": "输入 CF Handle",
         "input_init_rating": "初始 Rating",
-        "note": "**提示：** 每个 Handle 首次进行分析时，都需要下载该用户的历史比赛数据，耗时可能较长（几分钟）。该 Handle 后续再次运行时将使用缓存，速度会显著加快。",
+        "note": "**提示：** 每个 Handle 首次进行分析时，都需要下载该用户的历史比赛数据，耗时可能较长（几分钟），请耐心等待。",
         "checkbox_show_real": "显示官方 Rating 对比",
         "checkbox_help": "勾选后，将在图中叠加显示你实际的官方 CF Rating 曲线（蓝色虚线）以作对比。",
+        "checkbox_unrated": "显示 Unrated 比赛",
         "btn_clear_cache": "清除缓存",
         "msg_cache_cleared": "缓存已清除。",
         "btn_start": "开始分析",
@@ -71,22 +74,18 @@ TRANSLATIONS = {
     }
 }
 
-# Language Selector
 lang_option = st.sidebar.selectbox("Language / 语言", ["English", "中文"])
 LANG = "en" if lang_option == "English" else "zh"
 T = TRANSLATIONS[LANG]
 
-# ================= 2. Interface Rendering =================
 st.title(T["title"])
 st.markdown(T["subtitle"])
 
 st.sidebar.header(T["sidebar_header"])
 
-# Input fields
 HANDLE = st.sidebar.text_input(T["input_handle"], value="vivid_stareium")
 INITIAL_RATING = st.sidebar.number_input(T["input_init_rating"], value=1400, step=100)
 
-# Professional note
 st.sidebar.info(T["note"])
 
 SHOW_REAL_CURVE = st.sidebar.checkbox(
@@ -95,16 +94,20 @@ SHOW_REAL_CURVE = st.sidebar.checkbox(
     help=T["checkbox_help"]
 )
 
-if st.sidebar.button(T["btn_clear_cache"]):
-    st.cache_data.clear()
-    if 'sim_data' in st.session_state:
-        del st.session_state['sim_data']
-    st.sidebar.success(T["msg_cache_cleared"])
+SHOW_UNRATED = st.sidebar.checkbox(
+    T["checkbox_unrated"], 
+    value=False
+)
 
-# ================= 3. Data Processing Logic =================
-CACHE_DIR = "data"
+CACHE_DIR = "data"  
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
+
+if st.sidebar.button(T["btn_clear_cache"]):
+    st.cache_data.clear()
+    shutil.rmtree(CACHE_DIR, ignore_errors=True)
+    os.makedirs(CACHE_DIR)
+    st.success(T["msg_cache_cleared"])
 
 def get_json(url, params=None, use_cache=True):
     params_str = ""
@@ -119,69 +122,142 @@ def get_json(url, params=None, use_cache=True):
     if use_cache and os.path.exists(filepath):
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except: pass
+                data = json.load(f)
+            
+            if "ratingChanges" in filename and isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                return [{"rank": r[0], "oldRating": r[1], "newRating": r[2]} for r in data]
+            
+            if "contest.standings" in filename and isinstance(data, list):
+                return data
 
-    try:
-        if not use_cache: 
-            time.sleep(random.uniform(0.05, 0.1))
-        
-        resp = requests.get(url, params=params, timeout=15)
-        
-        if resp.status_code == 429:
-            time.sleep(random.uniform(1.5, 2.5))
-            return get_json(url, params, use_cache)
-        
-        resp.raise_for_status()
-        data = resp.json()
-        if data['status'] != 'OK': return None
-        
-        if use_cache:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(data['result'], f, ensure_ascii=False)
-        return data['result']
-    except Exception:
-        return None
+            return data
+        except Exception as e: 
+            print(f"Cache read error: {e}")
+            pass 
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                time.sleep(1.1) 
+            else:
+                time.sleep(random.uniform(0.1, 0.2))
+            
+            resp = requests.get(url, params=params, timeout=15)
+            
+            if resp.status_code == 429:
+                time.sleep(1.2) 
+                continue
+            
+            resp.raise_for_status()
+            data = resp.json()
+            if data['status'] != 'OK': 
+                raise ValueError(f"API Error: {data.get('comment')}")
+            
+            result = data['result']
+            save_data = result
+
+            if "ratingChanges" in url:
+                compact_list = []
+                for row in result:
+                    compact_list.append([row['rank'], row['oldRating'], row['newRating']])
+                save_data = compact_list
+            
+            if "contest.standings" in url:
+                compact_list = []
+                rows = result.get('rows', []) if isinstance(result, dict) else []
+                for row in rows:
+                    try:
+                        r = row['rank']
+                        t = row['party']['startTimeSeconds']
+                        v = 1 if row['party']['participantType'] == 'VIRTUAL' else 0
+                        compact_list.append([r, t, v])
+                    except: pass
+                save_data = compact_list
+            
+            if use_cache:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(save_data, f, separators=(',', ':'))
+            
+            if "ratingChanges" in url and isinstance(save_data, list):
+                 return [{"rank": r[0], "oldRating": r[1], "newRating": r[2]} for r in save_data]
+
+            if "contest.standings" in url:
+                return save_data
+
+            return result 
+
+        except Exception as e:
+            print(f"Fetch error {url} (Attempt {attempt+1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                return None
+
+    return None
 
 def fetch_vp_rank(cid, handle, sub_ts):
-    """Worker function to fetch rank from contest standings."""
     standings = get_json("https://codeforces.com/api/contest.standings", {
         "contestId": cid, "handles": handle, "showUnofficial": True
-    })
+    }, use_cache=True)
     
     contest_name = f"Contest {cid}"
+    
     user_rows = []
-    if standings:
-        contest_name = standings['contest']['name']
-        try:
-            for row in standings['rows']:
-                if row['party']['participantType'] == 'VIRTUAL': user_rows.append(row)
-        except: pass
+    if standings and isinstance(standings, list):
+        for row in standings:
+            if isinstance(row, list) and len(row) >= 3:
+                if row[2] == 1: 
+                    user_rows.append(row)
         
     matched_rank = 0
     if user_rows:
-        user_rows.sort(key=lambda r: r['party']['startTimeSeconds'])
+        user_rows.sort(key=lambda r: r[1])
         best_row = None
         for row in user_rows:
-            if row['party']['startTimeSeconds'] <= sub_ts + 48 * 3600: 
+            if row[1] <= sub_ts + 48 * 3600: 
                 best_row = row
             else: break
         if not best_row: best_row = user_rows[-1]
-        matched_rank = best_row['rank']
+        matched_rank = best_row[0]
         
     return cid, matched_rank, contest_name, sub_ts
 
-def fetch_rating_changes(cid):
-    """Worker function to fetch rating changes for a specific contest."""
-    data = get_json("https://codeforces.com/api/contest.ratingChanges", {"contestId": cid})
-    return cid, data
+def fetch_rating_changes_to_disk(cid):
+    get_json("https://codeforces.com/api/contest.ratingChanges", {"contestId": cid}, use_cache=True)
+    return cid
+
+def process_batches(task_list, worker_func, max_workers=5, update_callback=None):
+    results = []
+    total = len(task_list)
+    
+    chunks = [task_list[i:i + max_workers] for i in range(0, total, max_workers)]
+    
+    for chunk in chunks:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for item in chunk:
+                if isinstance(item, tuple):
+                    future = executor.submit(worker_func, *item)
+                else:
+                    future = executor.submit(worker_func, item)
+                futures.append(future)
+            
+            for future in as_completed(futures):
+                try:
+                    res = future.result()
+                    results.append(res)
+                except Exception as e:
+                    print(f"Batch execution error: {e}")
+                
+                if update_callback:
+                    update_callback()
+        
+    return results
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_processed_data(handle, init_rating):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # 1. Fetch Official History
     status_text.text("Fetching official contest history...")
     real_data = get_json("https://codeforces.com/api/user.rating", {"handle": handle}, use_cache=False)
     
@@ -204,7 +280,6 @@ def get_processed_data(handle, init_rating):
                 "name": row['contestName']
             })
 
-    # 2. Fetch VP History
     status_text.text("Scanning submission history for VPs...")
     progress_bar.progress(5)
     subs = get_json("https://codeforces.com/api/user.status", {"handle": handle}, use_cache=False)
@@ -229,56 +304,51 @@ def get_processed_data(handle, init_rating):
                     curr_start = times[k]
                     final_vp_list.append((cid, curr_start))
 
-    # 3. Parallel Fetch: VP Ranks
     valid_vp_list = [x for x in final_vp_list if x[0] < 100000]
     total_vp = len(valid_vp_list)
     
     if total_vp > 0:
         status_text.text(f"Retrieving ranks for {total_vp} virtual contests...")
         
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(fetch_vp_rank, cid, handle, ts): cid for cid, ts in valid_vp_list}
-            
-            completed_count = 0
-            for future in as_completed(futures):
-                cid, rank, cname, ts = future.result()
-                
-                if rank > 0:
-                    events.append({
-                        "cid": cid, "rank": rank, "ts": ts, "type": "VP", "name": cname
-                    })
-                
-                completed_count += 1
-                prog = 5 + int((completed_count / total_vp) * 45)
-                progress_bar.progress(prog)
-                status_text.text(f"Analyzing VP: {completed_count}/{total_vp} (Contest {cid})")
+        tasks = [(cid, handle, ts) for cid, ts in valid_vp_list]
+        
+        progress_tracker = {"count": 0}
+        def vp_progress_cb():
+            progress_tracker["count"] += 1
+            completed = progress_tracker["count"]
+            prog = 5 + int((completed / total_vp) * 45)
+            progress_bar.progress(prog)
+            status_text.text(f"Analyzing VP: {completed}/{total_vp}")
+
+        vp_results = process_batches(tasks, fetch_vp_rank, max_workers=5, update_callback=vp_progress_cb)
+
+        for res in vp_results:
+            if not res: continue
+            cid, rank, cname, ts = res
+            if rank > 0:
+                events.append({
+                    "cid": cid, "rank": rank, "ts": ts, "type": "VP", "name": cname
+                })
 
     events.sort(key=lambda x: x['ts'])
     
-    # 4. Parallel Fetch: Rating Changes
     target_cids = [e['cid'] for e in events if e['cid'] < 100000]
     total_downloads = len(target_cids)
-    changes_cache = {}
     
     if total_downloads > 0:
-        status_text.text(f"Downloading rating change data for {total_downloads} contests...")
+        status_text.text(f"Syncing contest data to disk (Lazy Loading)...")
         
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_cid = {executor.submit(fetch_rating_changes, cid): cid for cid in target_cids}
+        progress_tracker_dl = {"count": 0}
+        def dl_progress_cb():
+            progress_tracker_dl["count"] += 1
+            completed = progress_tracker_dl["count"]
+            prog = 50 + int((completed / total_downloads) * 45)
+            progress_bar.progress(prog)
+            status_text.text(f"Syncing Data: {completed}/{total_downloads}")
             
-            completed_count = 0
-            for future in as_completed(future_to_cid):
-                cid, data = future.result()
-                if data:
-                    changes_cache[cid] = data
-                
-                completed_count += 1
-                prog = 50 + int((completed_count / total_downloads) * 45)
-                progress_bar.progress(prog)
-                status_text.text(f"Fetching Rating Data: {completed_count}/{total_downloads}")
+        process_batches(target_cids, fetch_rating_changes_to_disk, max_workers=5, update_callback=dl_progress_cb)
 
-    # 5. Calculate Ratings
-    status_text.text("Finalizing rating simulation...")
+    status_text.text("Calculating rating simulation...")
     progress_bar.progress(98)
     
     curr = init_rating
@@ -292,35 +362,104 @@ def get_processed_data(handle, init_rating):
 
     for event in events:
         cid = event['cid']
-        changes = changes_cache.get(cid)
+        cname = event['name']
+        
+        changes = get_json("https://codeforces.com/api/contest.ratingChanges", {"contestId": cid}, use_cache=True)
+        
         if not changes: continue
 
-        candidates = [p for p in changes if abs(p['oldRating'] - curr) < 300] or changes
-        best_proxy = min(candidates, key=lambda p: abs(p['oldRating']-curr)*0.8 + abs(p['rank']-event['rank'])*1.5)
+        active_changes = [p for p in changes if p['newRating'] != p['oldRating']]
         
-        delta = best_proxy['newRating'] - best_proxy['oldRating']
-        if event['rank'] < best_proxy['rank']: delta += 1
-        elif event['rank'] > best_proxy['rank']: delta -= 1
+        max_official_rating = 0
+        if active_changes:
+            max_official_rating = max(p['oldRating'] for p in active_changes)
+        elif changes:
+            max_official_rating = max(p['oldRating'] for p in changes)
         
-        curr += delta
+        threshold = int((max_official_rating + 100) / 100) * 100
+            
+        if curr >= threshold:
+            sim_history.append({
+                "date": datetime.fromtimestamp(event['ts']),
+                "rating": curr,
+                "type": event['type'],
+                "name": f"{cname} (Unrated)",
+                "rank": event['rank'],
+                "delta": 0
+            })
+            del changes
+            continue 
+
+        candidates = [p for p in changes if abs(p['oldRating'] - curr) < 300]
+        if not candidates: candidates = changes
+
+        scored_candidates = []
+        for p in candidates:
+            cost = abs(p['oldRating'] - curr) * 0.8 + abs(p['rank'] - event['rank']) * 1.5
+            scored_candidates.append((cost, p))
+        
+        scored_candidates.sort(key=lambda x: x[0])
+        top_proxies = [x[1] for x in scored_candidates[:5]] 
+        
+        if not top_proxies: 
+            del changes
+            continue
+
+        raw_deltas = []
+        for p in top_proxies:
+            d = p['newRating'] - p['oldRating']
+            if event['rank'] < p['rank']: d += 1
+            elif event['rank'] > p['rank']: d -= 1
+            raw_deltas.append(d)
+        
+        final_delta = 0
+        if len(raw_deltas) >= 3:
+            raw_deltas.sort()
+            trimmed_deltas = raw_deltas[1:-1]
+            final_delta = sum(trimmed_deltas) / len(trimmed_deltas)
+        else:
+            final_delta = sum(raw_deltas) / len(raw_deltas)
+            
+        delta_int = int(round(final_delta))
+        
+        curr += delta_int
         sim_history.append({
             "date": datetime.fromtimestamp(event['ts']),
             "rating": curr,
             "type": event['type'],
-            "name": event['name'],
+            "name": cname,
             "rank": event['rank'],
-            "delta": delta
+            "delta": delta_int
         })
+        
+        del changes
+        del candidates
+        del scored_candidates
     
+    gc.collect()
+
     progress_bar.empty()
     status_text.empty()
     return sim_history, real_history
 
-# ================= 4. Visualization =================
 def plot_plotly(sim_history, real_history, show_real, local_t):
+    from datetime import timedelta
+
     fig = go.Figure()
 
-    sim_dates = [h['date'] for h in sim_history]
+    plot_dates = []
+    date_counter = {}
+
+    for h in sim_history:
+        date_key = h['date'].strftime('%Y-%m-%d')
+        if date_key in date_counter:
+            date_counter[date_key] += 1
+        else:
+            date_counter[date_key] = 0
+        
+        offset = timedelta(hours=6 * date_counter[date_key])
+        plot_dates.append(h['date'] + offset)
+
     sim_ratings = [h['rating'] for h in sim_history]
     
     sim_hover = []
@@ -333,26 +472,23 @@ def plot_plotly(sim_history, real_history, show_real, local_t):
             f"{local_t['tooltip_rating']}: {h['rating']} ({h['delta']:+d})<br>{local_t['tooltip_date']}: {h['date'].strftime('%Y-%m-%d')}"
         )
 
-    # Line for simulated path
     fig.add_trace(go.Scatter(
-        x=sim_dates, y=sim_ratings, mode='lines',
+        x=plot_dates, y=sim_ratings, mode='lines',
         line=dict(color='gray', width=1.5), 
         name=local_t["legend_sim"], 
         hoverinfo='skip'
     ))
     
-    # Markers for simulated path
     colors = ['#FF0000' if h['type'] == 'VP' else '#000000' for h in sim_history]
     sizes = [12 if h['type'] == 'VP' else 8 for h in sim_history]
     symbols = ['star' if h['type'] == 'VP' else 'circle' for h in sim_history]
 
     fig.add_trace(go.Scatter(
-        x=sim_dates, y=sim_ratings, mode='markers',
+        x=plot_dates, y=sim_ratings, mode='markers',
         marker=dict(color=colors, size=sizes, symbol=symbols, line=dict(width=1, color='white')),
         text=sim_hover, hoverinfo='text', showlegend=False
     ))
 
-    # Optional: Official Rating Curve
     if show_real and real_history:
         real_dates = [h['date'] for h in real_history]
         real_vals = [h['rating'] for h in real_history]
@@ -367,39 +503,71 @@ def plot_plotly(sim_history, real_history, show_real, local_t):
             opacity=0.7
         ))
 
-    # Background Color Bands (Codeforces Tiers)
     all_ratings = sim_ratings + ([h['rating'] for h in real_history] if show_real else [])
-    min_r, max_r = min(all_ratings), max(all_ratings)
-    y_lower = max(0, min_r - 200)
-    y_upper = max_r + 200
-    
-    color_bands = [
-        (0, 1199, '#CCCCCC'), (1200, 1399, '#77FF77'), (1400, 1599, '#77DDFF'),
-        (1600, 1899, '#AAAAFF'), (1900, 2099, '#FF88FF'), (2100, 2299, '#FFCC88'),
-        (2300, 2399, '#FFBB55'), (2400, 2999, '#FF7777'), (3000, 4000, '#AA0000')
-    ]
-    shapes = []
-    for low, high, color in color_bands:
-        if high < y_lower or low > y_upper: continue
-        shapes.append(dict(type="rect", xref="paper", yref="y", x0=0, y0=low, x1=1, y1=high, fillcolor=color, opacity=0.15, layer="below", line_width=0))
+    if all_ratings:
+        min_r, max_r = min(all_ratings), max(all_ratings)
+        y_lower = max(0, min_r - 200)
+        y_upper = max_r + 200
+        
+        color_bands = [
+            (0, 1199, '#CCCCCC'), (1200, 1399, '#77FF77'), (1400, 1599, '#77DDFF'),
+            (1600, 1899, '#AAAAFF'), (1900, 2099, '#FF88FF'), (2100, 2299, '#FFCC88'),
+            (2300, 2399, '#FFBB55'), (2400, 2999, '#FF7777'), (3000, 4000, '#AA0000')
+        ]
+        shapes = []
+        for low, high, color in color_bands:
+            if high < y_lower or low > y_upper: continue
+            shapes.append(dict(type="rect", xref="paper", yref="y", x0=0, y0=low, x1=1, y1=high, fillcolor=color, opacity=0.15, layer="below", line_width=0))
 
-    fig.update_layout(
-        title=f"{local_t['chart_title']} ({HANDLE})",
-        yaxis_title="Rating", yaxis=dict(range=[y_lower, y_upper]),
-        shapes=shapes, hovermode="closest", height=600,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-# ================= 5. Main Execution =================
+        fig.update_layout(
+            title=f"{local_t['chart_title']} ({HANDLE})",
+            yaxis_title="Rating", yaxis=dict(range=[y_lower, y_upper]),
+            shapes=shapes, hovermode="closest", height=600,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 if st.button(T["btn_start"], type="primary"):
-    with st.spinner(T["msg_init"]):
-        sim_data, real_data = get_processed_data(HANDLE, INITIAL_RATING)
-        st.session_state['sim_data'] = sim_data
-        st.session_state['real_data'] = real_data
+    
+    if HANDLE == "ALL_HISTORY":
+        st.info("Downloading all contest data (ID 1 -> Last)...")
+        
+        contests_data = get_json("https://codeforces.com/api/contest.list", {"gym": "false"}, use_cache=False)
+        if not contests_data:
+            st.error("Failed to fetch contest list")
+            st.stop()
+            
+        target_contests = [c['id'] for c in contests_data if c['phase'] == 'FINISHED' and c['id'] < 10000]
+        target_contests.sort()
+        
+        total_c = len(target_contests)
+        st.write(f"Found {total_c} contests. Starting sequential download...")
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        progress_tracker_all = {"count": 0}
+        def all_progress_cb():
+            progress_tracker_all["count"] += 1
+            completed = progress_tracker_all["count"]
+            if completed % 10 == 0 or completed == total_c: 
+                prog = int((completed / total_c) * 100)
+                progress_bar.progress(min(prog, 100))
+                status_text.text(f"Processing: {completed}/{total_c}")
 
-if 'sim_data' in st.session_state:
+        process_batches(target_contests, fetch_rating_changes_to_disk, max_workers=5, update_callback=all_progress_cb)
+        
+        progress_bar.progress(100)
+        st.success(f"Done. {total_c} contests cached.")
+
+    else:
+        with st.spinner(T["msg_init"]):
+            sim_data, real_data = get_processed_data(HANDLE, INITIAL_RATING)
+            st.session_state['sim_data'] = sim_data
+            st.session_state['real_data'] = real_data
+
+if 'sim_data' in st.session_state and HANDLE != "ALL_HISTORY":
+
     sim_data = st.session_state['sim_data']
     real_data = st.session_state['real_data']
     
@@ -422,4 +590,12 @@ if 'sim_data' in st.session_state:
         col3.metric(T["metric_gap"], f"{gap:+d}", delta_color="normal")
         
         st.divider()
-        plot_plotly(sim_data, real_data, SHOW_REAL_CURVE, T)
+
+        plot_sim_data = sim_data
+        if not SHOW_UNRATED:
+            plot_sim_data = [
+                d for d in sim_data 
+                if d['type'] == 'INIT' or "(Unrated)" not in d['name']
+            ]
+
+        plot_plotly(plot_sim_data, real_data, SHOW_REAL_CURVE, T)
