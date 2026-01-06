@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc 
 import threading
 import shutil
-api_lock = threading.Semaphore(4)
+api_lock = threading.Semaphore(2)
 file_lock = threading.Lock()
 
 st.set_page_config(page_title="CF Rating Predictor", layout="wide")
@@ -146,11 +146,11 @@ def get_json(url, params=None, use_cache=True):
                 if attempt > 0:
                     time.sleep(1.1) 
                 else:
-                    time.sleep(random.uniform(0.1, 0.2))
+                    time.sleep(random.uniform(0.2, 0.4))
                 
                 resp = requests.get(url, params=params, timeout=15)
                 if resp.status_code == 429:
-                    time.sleep(1.2) 
+                    time.sleep(2) 
                     continue
                 
                 resp.raise_for_status()
@@ -336,7 +336,7 @@ def get_processed_data(handle, init_rating):
             progress_bar.progress(prog)
             status_text.text(f"Syncing Data: {completed}/{total_downloads}")
             
-        process_batches(target_cids, fetch_rating_changes_to_disk, max_workers=5, update_callback=dl_progress_cb)
+        process_batches(target_cids, fetch_rating_changes_to_disk, max_workers=1, update_callback=dl_progress_cb)
 
     status_text.text("Calculating rating simulation...")
     progress_bar.progress(98)
