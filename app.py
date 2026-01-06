@@ -105,8 +105,6 @@ if not os.path.exists(CACHE_DIR):
 
 if st.sidebar.button(T["btn_clear_cache"]):
     st.cache_data.clear()
-    shutil.rmtree(CACHE_DIR, ignore_errors=True)
-    os.makedirs(CACHE_DIR)
     st.success(T["msg_cache_cleared"])
 
 def get_json(url, params=None, use_cache=True):
