@@ -109,6 +109,21 @@ if st.sidebar.button(T["btn_clear_cache"]):
     st.cache_data.clear()
     st.success(T["msg_cache_cleared"])
 
+def handle_430_cooldown(seconds=180):
+    cooldown_placeholder = st.sidebar.empty() 
+    
+    for remaining in range(seconds, 0, -1):
+        mins, secs = divmod(remaining, 60)
+        cooldown_placeholder.error(
+            f"**Codeforces Rate Limit**\n\n"
+            f"The server is temporarily throttled due to high traffic.\n\n"
+            f"**Cooling down: {mins:02d}:{secs:02d} remaining**\n\n"
+            "Please do not refresh the page. The request will automatically resume after the countdown."
+        )
+        time.sleep(1)
+    
+    cooldown_placeholder.empty() 
+
 def get_json(url, params=None, use_cache=True):
     params_str = ""
     if params:
@@ -149,6 +164,10 @@ def get_json(url, params=None, use_cache=True):
                     time.sleep(random.uniform(0.2, 0.4))
                 
                 resp = requests.get(url, params=params, timeout=15)
+
+                if resp.status_code == 430:
+                    handle_430_cooldown(200) 
+                    continue
                 if resp.status_code == 429:
                     time.sleep(2) 
                     continue
