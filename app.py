@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc 
 import threading
 import shutil
+
 api_lock = threading.Semaphore(2)
 file_lock = threading.Lock()
 
@@ -26,11 +27,14 @@ TRANSLATIONS = {
         "checkbox_show_real": "Show Official Rating Comparison",
         "checkbox_help": "Overlays your actual official rating curve (dashed blue line) for comparison.",
         "checkbox_unrated": "Show Unrated Contests",
-        "btn_clear_cache": "Clear Cache",
-        "msg_cache_cleared": "Cache cleared successfully.",
+        "btn_clear_cache": "Refresh Personal Data",
+        "help_btn_refresh": "Deletes local data for the current handle.\nFixes issues where recent VP records are not updating.\n\nNote: Re-downloading data will take time. Use with caution.",
+        "msg_refresh_success": "Memory cleared. Deleted {count} local cache files for **{handle}**.",
+        "msg_refresh_none": "Memory cleared. No local cache files found for **{handle}**.",
+        "msg_cache_cleared": "Cache cleared successfully.", 
         "btn_start": "Start Analysis",
         "msg_init": "Initializing analysis engine...",
-        "warn_no_data": "No data found. The Handle might be invalid or has no contest history. If you're sure it's correct, please wait for three minutes and try again, or contact vivid_stareium on Codeforces or email vividstareium@gmail.com for help.",
+        "warn_no_data": "No data found. The Handle might be invalid or has no contest history.",
         "warn_no_vp": "No Virtual Participation records found. Please check if the user has participated virtually.",
         "metric_pred": "Predicted Rating (w/ VP)",
         "metric_real": "Official Rating",
@@ -55,11 +59,14 @@ TRANSLATIONS = {
         "checkbox_show_real": "显示官方 Rating 对比",
         "checkbox_help": "勾选后，将在图中叠加显示你实际的官方 CF Rating 曲线（蓝色虚线）以作对比。",
         "checkbox_unrated": "显示 Unrated 比赛",
-        "btn_clear_cache": "清除缓存",
+        "btn_clear_cache": "刷新个人数据",
+        "help_btn_refresh": "按下后将删除当前 Handle 的本地数据。\n可解决近期 VP 后数据未更新的问题。\n\n注意：再次查询需重新等待较长时间下载数据，请谨慎使用。",
+        "msg_refresh_success": "内存已清理。已删除用户 **{handle}** 的 {count} 个本地缓存文件。",
+        "msg_refresh_none": "内存已清理。未找到用户 **{handle}** 的本地缓存。",
         "msg_cache_cleared": "缓存已清除。",
         "btn_start": "开始分析",
         "msg_init": "正在初始化分析引擎...",
-        "warn_no_data": "未找到数据。该 Handle 可能无效或没有任何参赛记录。如果您确定 Handle 无误，请稍等三分钟后再试，或者在 Codeforces 上联系 vivid_stareium 或发送邮件至 vividstareium@gmail.com 寻求帮助。",
+        "warn_no_data": "未找到数据。该 Handle 可能无效或没有任何参赛记录。",
         "warn_no_vp": "未检测到虚拟参赛 (VP) 记录。请确认该用户是否有过 VP。",
         "metric_pred": "当前预测分 (含VP)",
         "metric_real": "官方实际分",
@@ -105,13 +112,36 @@ CACHE_DIR = "data"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
-if st.sidebar.button(T["btn_clear_cache"]):
+if st.sidebar.button(T["btn_clear_cache"], help=T["help_btn_refresh"]):
     st.cache_data.clear()
-    st.success(T["msg_cache_cleared"])
+    
+    files_deleted = 0
+    if os.path.exists(CACHE_DIR):
+        target_handle_lower = HANDLE.lower()
+        for fname in os.listdir(CACHE_DIR):
+            fname_lower = fname.lower()
+            patterns = [
+                f"handle_{target_handle_lower}_",
+                f"handle_{target_handle_lower}.json",
+                f"handles_{target_handle_lower}_",
+                f"handles_{target_handle_lower}.json"
+            ]
+            
+            if any(p in fname_lower for p in patterns):
+                try:
+                    file_path = os.path.join(CACHE_DIR, fname)
+                    os.remove(file_path)
+                    files_deleted += 1
+                except Exception as e:
+                    print(f"Error deleting {fname}: {e}")
+
+    if files_deleted > 0:
+        st.success(T["msg_refresh_success"].format(count=files_deleted, handle=HANDLE))
+    else:
+        st.warning(T["msg_refresh_none"].format(handle=HANDLE))
 
 def handle_430_cooldown(seconds=180):
     cooldown_placeholder = st.sidebar.empty() 
-    
     for remaining in range(seconds, 0, -1):
         mins, secs = divmod(remaining, 60)
         cooldown_placeholder.error(
@@ -121,7 +151,6 @@ def handle_430_cooldown(seconds=180):
             "Please do not refresh the page. The request will automatically resume after the countdown."
         )
         time.sleep(1)
-    
     cooldown_placeholder.empty() 
 
 def get_json(url, params=None, use_cache=True):
@@ -237,7 +266,6 @@ def fetch_rating_changes_to_disk(cid):
 def process_batches(task_list, worker_func, max_workers=10, update_callback=None):
     results = []
     total = len(task_list)
-    
     chunks = [task_list[i:i + max_workers] for i in range(0, total, max_workers)]
     
     for chunk in chunks:
@@ -256,10 +284,8 @@ def process_batches(task_list, worker_func, max_workers=10, update_callback=None
                     results.append(res)
                 except Exception as e:
                     print(f"Batch execution error: {e}")
-                
                 if update_callback:
                     update_callback()
-        
     return results
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -318,9 +344,7 @@ def get_processed_data(handle, init_rating):
     
     if total_vp > 0:
         status_text.text(f"Retrieving ranks for {total_vp} virtual contests...")
-        
         tasks = [(cid, handle, ts) for cid, ts in valid_vp_list]
-        
         progress_tracker = {"count": 0}
         def vp_progress_cb():
             progress_tracker["count"] += 1
@@ -346,7 +370,6 @@ def get_processed_data(handle, init_rating):
     
     if total_downloads > 0:
         status_text.text(f"Syncing contest data to disk (Lazy Loading)...")
-        
         progress_tracker_dl = {"count": 0}
         def dl_progress_cb():
             progress_tracker_dl["count"] += 1
@@ -372,7 +395,6 @@ def get_processed_data(handle, init_rating):
     for event in events:
         cid = event['cid']
         cname = event['name']
-        
         changes = get_json("https://codeforces.com/api/contest.ratingChanges", {"contestId": cid}, use_cache=True)
         
         if not changes: continue
@@ -390,13 +412,9 @@ def get_processed_data(handle, init_rating):
         if curr >= threshold:
             sim_history.append({
                 "date": datetime.fromtimestamp(event['ts']),
-                "rating": curr,
-                "type": event['type'],
-                "name": f"{cname} (Unrated)",
-                "rank": event['rank'],
-                "delta": 0
+                "rating": curr, "type": event['type'], "name": f"{cname} (Unrated)",
+                "rank": event['rank'], "delta": 0
             })
-            del changes
             continue 
 
         candidates = [p for p in changes if abs(p['oldRating'] - curr) < 300]
@@ -410,9 +428,7 @@ def get_processed_data(handle, init_rating):
         scored_candidates.sort(key=lambda x: x[0])
         top_proxies = [x[1] for x in scored_candidates[:5]] 
         
-        if not top_proxies: 
-            del changes
-            continue
+        if not top_proxies: continue
 
         raw_deltas = []
         for p in top_proxies:
@@ -434,26 +450,17 @@ def get_processed_data(handle, init_rating):
         curr += delta_int
         sim_history.append({
             "date": datetime.fromtimestamp(event['ts']),
-            "rating": curr,
-            "type": event['type'],
-            "name": cname,
-            "rank": event['rank'],
-            "delta": delta_int
+            "rating": curr, "type": event['type'], "name": cname,
+            "rank": event['rank'], "delta": delta_int
         })
-        
-        del changes
-        del candidates
-        del scored_candidates
     
     gc.collect()
-
     progress_bar.empty()
     status_text.empty()
     return sim_history, real_history
 
 def plot_plotly(sim_history, real_history, show_real, local_t):
     from datetime import timedelta
-
     fig = go.Figure()
 
     plot_dates = []
@@ -470,7 +477,6 @@ def plot_plotly(sim_history, real_history, show_real, local_t):
         plot_dates.append(h['date'] + offset)
 
     sim_ratings = [h['rating'] for h in sim_history]
-    
     sim_hover = []
     for h in sim_history:
         type_str = local_t["tooltip_real"] if h['type'] == 'REAL' else local_t["tooltip_vp"]
@@ -484,8 +490,7 @@ def plot_plotly(sim_history, real_history, show_real, local_t):
     fig.add_trace(go.Scatter(
         x=plot_dates, y=sim_ratings, mode='lines',
         line=dict(color='gray', width=1.5), 
-        name=local_t["legend_sim"], 
-        hoverinfo='skip'
+        name=local_t["legend_sim"], hoverinfo='skip'
     ))
     
     colors = ['#FF0000' if h['type'] == 'VP' else '#000000' for h in sim_history]
@@ -508,8 +513,7 @@ def plot_plotly(sim_history, real_history, show_real, local_t):
             line=dict(color='#1E90FF', width=2, dash='dash'),
             marker=dict(size=6, color='#1E90FF'),
             text=real_hover, hoverinfo='text',
-            name=local_t["legend_real"],
-            opacity=0.7
+            name=local_t["legend_real"], opacity=0.7
         ))
 
     all_ratings = sim_ratings + ([h['rating'] for h in real_history] if show_real else [])
@@ -540,7 +544,6 @@ if st.button(T["btn_start"], type="primary"):
     
     if HANDLE == "ALL_HISTORY":
         st.info("Downloading all contest data (ID 1 -> Last)...")
-        
         contests_data = get_json("https://codeforces.com/api/contest.list", {"gym": "false"}, use_cache=False)
         if not contests_data:
             st.error("Failed to fetch contest list")
@@ -548,7 +551,6 @@ if st.button(T["btn_start"], type="primary"):
             
         target_contests = [c['id'] for c in contests_data if c['phase'] == 'FINISHED' and c['id'] < 10000]
         target_contests.sort()
-        
         total_c = len(target_contests)
         st.write(f"Found {total_c} contests. Starting sequential download...")
         
@@ -565,7 +567,6 @@ if st.button(T["btn_start"], type="primary"):
                 status_text.text(f"Processing: {completed}/{total_c}")
 
         process_batches(target_contests, fetch_rating_changes_to_disk, max_workers=5, update_callback=all_progress_cb)
-        
         progress_bar.progress(100)
         st.success(f"Done. {total_c} contests cached.")
 
@@ -582,7 +583,6 @@ if 'sim_data' in st.session_state and HANDLE != "ALL_HISTORY":
     
     if not sim_data:
         st.error(T["warn_no_data"])
-    
     else:
         vp_count = sum(1 for d in sim_data if d.get('type') == 'VP')
         if vp_count == 0:
@@ -602,9 +602,6 @@ if 'sim_data' in st.session_state and HANDLE != "ALL_HISTORY":
 
         plot_sim_data = sim_data
         if not SHOW_UNRATED:
-            plot_sim_data = [
-                d for d in sim_data 
-                if d['type'] == 'INIT' or "(Unrated)" not in d['name']
-            ]
+            plot_sim_data = [d for d in sim_data if d['type'] == 'INIT' or "(Unrated)" not in d['name']]
 
         plot_plotly(plot_sim_data, real_data, SHOW_REAL_CURVE, T)
