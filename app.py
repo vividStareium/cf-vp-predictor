@@ -395,8 +395,25 @@ def get_processed_data(handle, init_rating):
     for event in events:
         cid = event['cid']
         cname = event['name']
+        
         changes = get_json("https://codeforces.com/api/contest.ratingChanges", {"contestId": cid}, use_cache=True)
         
+        if not changes:
+            days_diff = (time.time() - event['ts']) / (24 * 3600)
+            
+            if days_diff < 10:
+                fname = f"ratingChanges_contestId_{cid}.json"
+                fpath = os.path.join(CACHE_DIR, fname)
+                
+                if os.path.exists(fpath):
+                    try:
+                        os.remove(fpath)
+                    except Exception: 
+                        pass
+                
+                time.sleep(0.2) 
+                changes = get_json("https://codeforces.com/api/contest.ratingChanges", {"contestId": cid}, use_cache=True)
+
         if not changes: continue
 
         active_changes = [p for p in changes if p['newRating'] != p['oldRating']]
