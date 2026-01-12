@@ -15,7 +15,7 @@
 **在线体验**
 
 您可以通过以下链接直接在线使用：
-[CF Rating Predictor · Streamlit](https://www.google.com/search?q=https://cf-vp-predictor.streamlit.app/)
+[CF Rating Predictor · Streamlit](https://cf-vp-predictor.streamlit.app/)
 
 ---
 
@@ -34,7 +34,7 @@ A Codeforces rating prediction tool built with Streamlit. It integrates official
 **Live Demo**
 
 You can access the tool online at:
-[CF Rating Predictor · Streamlit](https://www.google.com/search?q=https://cf-vp-predictor.streamlit.app/)
+[CF Rating Predictor · Streamlit](https://cf-vp-predictor.streamlit.app/)
 
 ---
 
