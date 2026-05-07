@@ -232,31 +232,86 @@ def get_json(url, params=None, use_cache=True):
 
     return None
 
+def get_official_standings(cid):
+    """获取公开的官方纯净榜单（含题目满分数据），无任何权限限制"""
+    try:
+        resp = requests.get("https://codeforces.com/api/contest.standings", params={"contestId": cid}, timeout=15)
+        if resp.status_code == 200:
+            return resp.json().get('result')
+    except Exception as e:
+        print(f"获取 {cid} 榜单失败: {e}")
+    return None
+
 def fetch_vp_rank(cid, handle, sub_ts):
-    standings = get_json("https://codeforces.com/api/contest.standings", {
-        "contestId": cid, "handles": handle, "showUnofficial": True
-    }, use_cache=True)
-    
     contest_name = f"Contest {cid}"
-    
-    user_rows = []
-    if standings and isinstance(standings, list):
-        for row in standings:
-            if isinstance(row, list) and len(row) >= 3:
-                if row[2] == 1: 
-                    user_rows.append(row)
-        
     matched_rank = 0
-    if user_rows:
-        user_rows.sort(key=lambda r: r[1])
-        best_row = None
-        for row in user_rows:
-            if row[1] <= sub_ts + 48 * 3600: 
-                best_row = row
-            else: break
-        if not best_row: best_row = user_rows[-1]
-        matched_rank = best_row[0]
+    
+    subs = get_json("https://codeforces.com/api/user.status", {"handle": handle}, use_cache=True)
+    if not subs:
+        return cid, 0, contest_name, sub_ts
+
+    vp_subs = [s for s in subs if s.get('contestId') == cid and s.get('author', {}).get('participantType') == 'VIRTUAL']
+    vp_subs.sort(key=lambda x: x['creationTimeSeconds'])
+    
+    if not vp_subs:
+        return cid, 0, contest_name, sub_ts
+
+    vp_start_time = vp_subs[0]['author'].get('startTimeSeconds', sub_ts)
+    
+    ac_problems = {} 
+    wa_counts = {}
+    
+    for sub in vp_subs:
+        pid = sub['problem']['index']
+        if pid in ac_problems: 
+            continue 
+            
+        verdict = sub.get('verdict')
+        if verdict == 'OK':
+            elapsed_mins = (sub['creationTimeSeconds'] - vp_start_time) // 60
+            ac_problems[pid] = (elapsed_mins, wa_counts.get(pid, 0))
+        elif verdict not in ['COMPILATION_ERROR', 'TESTING']:
+            wa_counts[pid] = wa_counts.get(pid, 0) + 1
+
+    standings_data = get_official_standings(cid)
+    if not standings_data:
+        return cid, 0, contest_name, sub_ts
         
+    contest_name = standings_data['contest'].get('name', contest_name)
+    contest_type = standings_data['contest'].get('type', 'CF')
+    problems_info = standings_data['problems']
+    rows = standings_data['rows']
+
+    total_points = 0
+    total_penalty = 0
+
+    if contest_type == 'ICPC':
+        total_points = len(ac_problems)
+        for pid, (mins, wa) in ac_problems.items():
+            total_penalty += mins + wa * 20
+    else:
+        for pid, (mins, wa) in ac_problems.items():
+            base_points = 0
+            for p in problems_info:
+                if p['index'] == pid:
+                    base_points = p.get('points', 0)
+                    break
+            
+            if base_points > 0:
+                score = max(base_points * 0.3, base_points - (base_points / 250) * mins) - 50 * wa
+                total_points += max(0, score) 
+                
+    matched_rank = len(rows) + 1
+    for i, row in enumerate(rows):
+        if contest_type == 'ICPC':
+            if row['points'] < total_points or (row['points'] == total_points and row['penalty'] > total_penalty):
+                matched_rank = i + 1
+                break
+        else:
+            if row['points'] < total_points:
+                matched_rank = i + 1
+                break
+
     return cid, matched_rank, contest_name, sub_ts
 
 def fetch_rating_changes_to_disk(cid):
